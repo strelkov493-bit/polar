@@ -17,8 +17,8 @@
   .wrap {
     min-height: 100dvh;
     display: grid;
-    grid-template-rows: auto auto 1fr auto;
-    gap: 10px;
+    grid-template-rows: auto auto auto 1fr auto;
+    gap: 8px;
     padding: 12px;
     max-width: 720px;
     margin: 0 auto;
@@ -35,6 +35,23 @@
   .status.on   { background: #1f6feb33; color: #58a6ff; }
   .status.err  { background: #f8514933; color: #f85149; }
   .status.wait { background: #d2992233; color: #d29922; }
+
+  /* Вкладки */
+  .tabs {
+    display: flex; gap: 4px;
+    background: #161b22; border-radius: 10px; padding: 4px;
+    border: 1px solid #30363d;
+  }
+  .tab {
+    flex: 1; padding: 8px 10px; border-radius: 8px;
+    text-align: center; font-size: 12px; font-weight: 600;
+    color: #8b949e; cursor: pointer; user-select: none;
+    transition: background .15s ease, color .15s ease;
+  }
+  .tab.active {
+    background: #1f6feb; color: #fff;
+  }
+
   .bpm-row {
     display: flex; align-items: baseline; gap: 8px;
     justify-content: center;
@@ -84,6 +101,11 @@
     <div id="status" class="status wait">инициализация…</div>
   </header>
 
+  <div class="tabs">
+    <div id="tabPhone" class="tab">📱 Телефон</div>
+    <div id="tabWatch" class="tab">⌚ Часы</div>
+  </div>
+
   <div class="bpm-row">
     <div id="bpm" class="bpm low">--</div>
     <div class="unit">уд/мин</div>
@@ -113,19 +135,24 @@
   const MAX_POINTS = 300;
   const MIN_BPM = 40;
   const MAX_BPM = 200;
+  const MODE_KEY = "polar_mode"; // 'phone' | 'watch'
 
   const bpmEl    = document.getElementById("bpm");
   const statusEl = document.getElementById("status");
   const btn      = document.getElementById("connectBtn");
   const canvas   = document.getElementById("chart");
   const ctx      = canvas.getContext("2d");
+  const tabPhone = document.getElementById("tabPhone");
+  const tabWatch = document.getElementById("tabWatch");
 
   const points = [];
-  const hasWebBluetooth = !!navigator.bluetooth;
 
+  let mode = localStorage.getItem(MODE_KEY) || "phone";
   let device = null;
   let characteristic = null;
   let isConnected = false;
+  let ws = null;
+  let wsRetryTimer = null;
 
   // ─── UI helpers ───────────────────────────────────────────
 
@@ -145,6 +172,46 @@
     statusEl.textContent = text;
     statusEl.className = "status " + cls;
   }
+
+  function applyModeUI() {
+    if (mode === "phone") {
+      tabPhone.classList.add("active");
+      tabWatch.classList.remove("active");
+      btn.classList.remove("hidden");
+      if (isConnected) {
+        setStatus("подключено: " + (device?.name || "H10"), "on");
+      } else {
+        setStatus("готово к подключению", "");
+      }
+    } else {
+      tabWatch.classList.add("active");
+      tabPhone.classList.remove("active");
+      btn.classList.add("hidden");
+      setStatus("ожидание сервера…", "wait");
+    }
+  }
+
+  function setMode(newMode) {
+    if (mode === newMode) return;
+    mode = newMode;
+    localStorage.setItem(MODE_KEY, mode);
+
+    // Если переключаемся с телефона на часы — отключаем Bluetooth
+    if (mode === "watch" && isConnected) {
+      disconnectBluetooth();
+    }
+
+    // Очистим график при смене режима
+    points.length = 0;
+    bpmEl.textContent = "--";
+    bpmEl.className = "bpm low";
+    draw();
+
+    applyModeUI();
+  }
+
+  tabPhone.addEventListener("click", () => setMode("phone"));
+  tabWatch.addEventListener("click", () => setMode("watch"));
 
   // ─── Canvas ───────────────────────────────────────────────
 
@@ -210,9 +277,6 @@
 
   // ─── WebSocket ────────────────────────────────────────────
 
-  let ws = null;
-  let wsRetryTimer = null;
-
   function connectWS() {
     clearTimeout(wsRetryTimer);
     try {
@@ -226,12 +290,11 @@
 
     ws.onopen = () => {
       console.log("WS connected");
-      if (!hasWebBluetooth) setStatus("ожидание пульса…", "wait");
+      if (mode === "watch") setStatus("ожидание пульса…", "wait");
     };
 
     ws.onmessage = (event) => {
-      // На часах все данные приходят сюда
-      if (hasWebBluetooth) return;
+      if (mode !== "watch") return; // в режиме телефона игнорируем
       try {
         const data = JSON.parse(event.data);
         if (typeof data.bpm === "number") {
@@ -243,13 +306,13 @@
 
     ws.onclose = () => {
       console.log("WS closed, reconnecting…");
-      if (!hasWebBluetooth) setStatus("переподключение…", "err");
+      if (mode === "watch") setStatus("переподключение…", "err");
       wsRetryTimer = setTimeout(connectWS, 2000);
     };
 
     ws.onerror = (e) => {
       console.error("WS error:", e);
-      if (!hasWebBluetooth) setStatus("WS ошибка", "err");
+      if (mode === "watch") setStatus("WS ошибка", "err");
     };
   }
 
@@ -282,6 +345,7 @@
   }
 
   async function connectBluetooth() {
+    if (mode !== "phone") return;
     if (!navigator.bluetooth) {
       setStatus("Web Bluetooth недоступен", "err");
       return;
@@ -338,7 +402,9 @@
   function onDisconnected() {
     isConnected = false;
     characteristic = null;
-    setStatus("отключено", "err");
+    if (mode === "phone") {
+      setStatus("отключено", "err");
+    }
     bpmEl.textContent = "--";
     bpmEl.className = "bpm low";
     btn.textContent = "Подключить Polar H10";
@@ -350,18 +416,12 @@
 
   fitCanvas();
   connectWS();
+  applyModeUI();
 
-  if (hasWebBluetooth) {
-    btn.classList.remove("hidden");
-    btn.addEventListener("click", () => {
-      if (isConnected) disconnectBluetooth();
-      else connectBluetooth();
-    });
-    setStatus("готово к подключению", "");
-  } else {
-    btn.classList.add("hidden");
-    setStatus("ожидание сервера…", "wait");
-  }
+  btn.addEventListener("click", () => {
+    if (isConnected) disconnectBluetooth();
+    else connectBluetooth();
+  });
 })();
 </script>
 </body>
