@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#0d1117" />
+<title>Polar H10 — пульс</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0d1117; color: #e6edf3;
+    font-family: -apple-system, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+  }
+  .wrap {
+    min-height: 100dvh;
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    gap: 12px;
+    padding: 16px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .title { font-weight: 600; font-size: 15px; }
+  .status {
+    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: #21262d; color: #8b949e; white-space: nowrap;
+  }
+  .status.on   { background: #1f6feb33; color: #58a6ff; }
+  .status.err  { background: #f8514933; color: #f85149; }
+  .bpm-row {
+    display: flex; align-items: baseline; gap: 10px;
+    justify-content: center;
+  }
+  .bpm {
+    font-size: clamp(80px, 26vw, 200px);
+    font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums;
+    transition: color .25s ease;
+    letter-spacing: -2px;
+  }
+  .bpm.low  { color: #58a6ff; }
+  .bpm.ok   { color: #3fb950; }
+  .bpm.high { color: #f0883e; }
+  .bpm.max  { color: #f85149; }
+  .unit { font-size: 18px; color: #8b949e; }
+  canvas {
+    width: 100%; height: 200px; display: block;
+    background: #161b22; border-radius: 12px;
+    border: 1px solid #30363d;
+  }
+  footer {
+    display: flex; flex-direction: column; gap: 10px;
+    align-items: stretch;
+  }
+  button {
+    font: inherit; font-weight: 600; font-size: 16px;
+    padding: 14px 20px; border-radius: 12px; border: none;
+    background: #238636; color: #fff; cursor: pointer;
+    transition: background .15s ease, transform .05s ease;
+  }
+  button:active { transform: scale(0.98); }
+  button:disabled { background: #21262d; color: #6e7681; cursor: default; }
+  button.disconnect { background: #da3633; }
+  .zones {
+    display: flex; gap: 6px; font-size: 11px; color: #8b949e;
+    justify-content: center; flex-wrap: wrap;
+  }
+  .zones span { padding: 3px 8px; border-radius: 6px; background: #21262d; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="title">❤️ Polar H10</div>
+    <div id="status" class="status">не подключено</div>
+  </header>
+
+  <div class="bpm-row">
+    <div id="bpm" class="bpm low">--</div>
+    <div class="unit">уд/мин</div>
+  </div>
+
+  <canvas id="chart"></canvas>
+
+  <footer>
+    <button id="connectBtn">Подключить Polar H10</button>
+    <div class="zones">
+      <span>&lt;100 низкий</span>
+      <span>100–140 ок</span>
+      <span>140–170 высокий</span>
+      <span>&gt;170 макс</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const MAX_POINTS = 300;      // ~5 минут при 1 Гц
+  const MIN_BPM = 40;
+  const MAX_BPM = 200;
+
+  const bpmEl    = document.getElementById("bpm");
+  const statusEl = document.getElementById("status");
+  const btn      = document.getElementById("connectBtn");
+  const canvas   = document.getElementById("chart");
+  const ctx      = canvas.getContext("2d");
+
+  /** @type {{bpm:number, t:number}[]} */
+  const points = [];
+
+  let device = null;
+  let characteristic = null;
+  let isConnected = false;
+
+  // ---------- UI helpers ----------
+
+  function zoneClass(bpm) {
+    if (bpm < 100) return "low";
+    if (bpm < 140) return "ok";
+    if (bpm < 170) return "high";
+    return "max";
+  }
+
+  function setBpm(bpm) {
+    bpmEl.textContent = String(bpm);
+    bpmEl.className = "bpm " + zoneClass(bpm);
+  }
+
+  function setStatus(text, cls = "") {
+    statusEl.textContent = text;
+    statusEl.className = "status " + cls;
+  }
+
+  // ---------- canvas ----------
+
+  function fitCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width  = Math.round(rect.width  * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function draw() {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+
+    // Grid
+    ctx.strokeStyle = "#21262d";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = Math.round((h / 4) * i) + 0.5;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+
+    if (points.length < 2) return;
+
+    const yFor = (bpm) => {
+      const v = Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
+      return h - ((v - MIN_BPM) / (MAX_BPM - MIN_BPM)) * h;
+    };
+    const xFor = (i) => (i / (MAX_POINTS - 1)) * w;
+
+    // Line
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#58a6ff";
+    ctx.beginPath();
+    const offset = Math.max(0, points.length - MAX_POINTS);
+    const visible = points.slice(offset);
+    visible.forEach((p, i) => {
+      const x = xFor(i);
+      const y = yFor(p.bpm);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Last point dot
+    const last = visible[visible.length - 1];
+    ctx.fillStyle = "#e6edf3";
+    ctx.beginPath();
+    ctx.arc(xFor(visible.length - 1), yFor(last.bpm), 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function pushPoint(bpm) {
+    points.push({ bpm, t: performance.now() });
+    if (points.length > MAX_POINTS * 2) {
+      points.splice(0, points.length - MAX_POINTS);
+    }
+    setBpm(bpm);
+    draw();
+  }
+
+  window.addEventListener("resize", fitCanvas);
+
+  // ---------- Web Bluetooth ----------
+
+  function parseHeartRate(dataView) {
+    const flags = dataView.getUint8(0);
+    if (flags & 0x01) {
+      return dataView.getUint16(1, /* littleEndian */ true);
+    }
+    return dataView.getUint8(1);
+  }
+
+  function onHeartRateChanged(event) {
+    try {
+      const bpm = parseHeartRate(event.target.value);
+      pushPoint(bpm);
+    } catch (e) {
+      console.error("Parse error:", e);
+    }
+  }
+
+  async function connect() {
+    if (!navigator.bluetooth) {
+      setStatus("Web Bluetooth недоступен", "err");
+      alert(
+        "Ваш браузер не поддерживает Web Bluetooth.\n" +
+        "Используйте Chrome, Edge или Opera на Android."
+      );
+      return;
+    }
+
+    try {
+      setStatus("поиск устройства…", "");
+      btn.disabled = true;
+
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: ["heart_rate"] }],
+        optionalServices: ["battery_service", "device_information"],
+      });
+
+      device.addEventListener("gattserverdisconnected", onDisconnected);
+
+      setStatus("подключение…", "");
+      const server = await device.gatt.connect();
+
+      const service = await server.getPrimaryService("heart_rate");
+      characteristic = await service.getCharacteristic("heart_rate_measurement");
+
+      await characteristic.startNotifications();
+      characteristic.addEventListener(
+        "characteristicvaluechanged",
+        onHeartRateChanged
+      );
+
+      isConnected = true;
+      setStatus("подключено: " + (device.name || "H10"), "on");
+      btn.textContent = "Отключить";
+      btn.classList.add("disconnect");
+      btn.disabled = false;
+    } catch (err) {
+      console.error(err);
+      btn.disabled = false;
+      if (err.name === "NotFoundError") {
+        setStatus("устройство не выбрано", "");
+      } else if (err.name === "SecurityError" || err.name === "NotAllowedError") {
+        setStatus("нужен HTTPS", "err");
+        alert(
+          "Bluetooth заблокирован.\n\n" +
+          "Chrome требует HTTPS или localhost для Web Bluetooth.\n" +
+          "Загрузите этот файл на GitHub Pages / Netlify или откройте через https://."
+        );
+      } else {
+        setStatus("ошибка: " + err.message, "err");
+      }
+    }
+  }
+
+  async function disconnect() {
+    try {
+      if (characteristic) {
+        characteristic.removeEventListener(
+          "characteristicvaluechanged",
+          onHeartRateChanged
+        );
+        try {
+          await characteristic.stopNotifications();
+        } catch {}
+      }
+      if (device && device.gatt && device.gatt.connected) {
+        device.gatt.disconnect();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    onDisconnected();
+  }
+
+  function onDisconnected() {
+    isConnected = false;
+    characteristic = null;
+    setStatus("отключено", "err");
+    bpmEl.textContent = "--";
+    bpmEl.className = "bpm low";
+    btn.textContent = "Подключить Polar H10";
+    btn.classList.remove("disconnect");
+    btn.disabled = false;
+  }
+
+  btn.addEventListener("click", () => {
+    if (isConnected) disconnect();
+    else connect();
+  });
+
+  // ---------- init ----------
+
+  fitCanvas();
+})();
+</script>
+</body>
+</html>
