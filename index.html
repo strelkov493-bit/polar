@@ -18,28 +18,29 @@
     min-height: 100dvh;
     display: grid;
     grid-template-rows: auto auto 1fr auto;
-    gap: 12px;
-    padding: 16px;
+    gap: 10px;
+    padding: 12px;
     max-width: 720px;
     margin: 0 auto;
   }
   header {
     display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; flex-wrap: wrap;
+    gap: 10px; flex-wrap: wrap;
   }
-  .title { font-weight: 600; font-size: 15px; }
+  .title { font-weight: 600; font-size: 14px; }
   .status {
-    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    font-size: 11px; padding: 4px 10px; border-radius: 999px;
     background: #21262d; color: #8b949e; white-space: nowrap;
   }
   .status.on   { background: #1f6feb33; color: #58a6ff; }
   .status.err  { background: #f8514933; color: #f85149; }
+  .status.wait { background: #d2992233; color: #d29922; }
   .bpm-row {
-    display: flex; align-items: baseline; gap: 10px;
+    display: flex; align-items: baseline; gap: 8px;
     justify-content: center;
   }
   .bpm {
-    font-size: clamp(80px, 26vw, 200px);
+    font-size: clamp(72px, 26vw, 180px);
     font-weight: 800; line-height: 1;
     font-variant-numeric: tabular-nums;
     transition: color .25s ease;
@@ -49,19 +50,19 @@
   .bpm.ok   { color: #3fb950; }
   .bpm.high { color: #f0883e; }
   .bpm.max  { color: #f85149; }
-  .unit { font-size: 18px; color: #8b949e; }
+  .unit { font-size: 16px; color: #8b949e; }
   canvas {
-    width: 100%; height: 200px; display: block;
+    width: 100%; height: 180px; display: block;
     background: #161b22; border-radius: 12px;
     border: 1px solid #30363d;
   }
   footer {
-    display: flex; flex-direction: column; gap: 10px;
+    display: flex; flex-direction: column; gap: 8px;
     align-items: stretch;
   }
   button {
-    font: inherit; font-weight: 600; font-size: 16px;
-    padding: 14px 20px; border-radius: 12px; border: none;
+    font: inherit; font-weight: 600; font-size: 15px;
+    padding: 12px 18px; border-radius: 12px; border: none;
     background: #238636; color: #fff; cursor: pointer;
     transition: background .15s ease, transform .05s ease;
   }
@@ -69,18 +70,18 @@
   button:disabled { background: #21262d; color: #6e7681; cursor: default; }
   button.disconnect { background: #da3633; }
   .zones {
-    display: flex; gap: 6px; font-size: 11px; color: #8b949e;
+    display: flex; gap: 6px; font-size: 10px; color: #8b949e;
     justify-content: center; flex-wrap: wrap;
   }
-  .zones span { padding: 3px 8px; border-radius: 6px; background: #21262d; }
-  .hidden { display: none; }
+  .zones span { padding: 3px 7px; border-radius: 6px; background: #21262d; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <div class="title">❤️ Polar H10</div>
-    <div id="status" class="status">не подключено</div>
+    <div id="status" class="status wait">инициализация…</div>
   </header>
 
   <div class="bpm-row">
@@ -91,7 +92,7 @@
   <canvas id="chart"></canvas>
 
   <footer>
-    <button id="connectBtn">Подключить Polar H10</button>
+    <button id="connectBtn" class="hidden">Подключить Polar H10</button>
     <div class="zones">
       <span>&lt;100 низкий</span>
       <span>100–140 ок</span>
@@ -103,7 +104,13 @@
 
 <script>
 (() => {
-  const MAX_POINTS = 300;      // ~5 минут при 1 Гц
+  // ═══════════════════════════════════════════════════════════
+  //  ⚙️  НАСТРОЙКА
+  // ═══════════════════════════════════════════════════════════
+  const WS_URL = "wss://polar.richforever.ru:9443";
+  // ═══════════════════════════════════════════════════════════
+
+  const MAX_POINTS = 300;
   const MIN_BPM = 40;
   const MAX_BPM = 200;
 
@@ -113,14 +120,14 @@
   const canvas   = document.getElementById("chart");
   const ctx      = canvas.getContext("2d");
 
-  /** @type {{bpm:number, t:number}[]} */
   const points = [];
+  const hasWebBluetooth = !!navigator.bluetooth;
 
   let device = null;
   let characteristic = null;
   let isConnected = false;
 
-  // ---------- UI helpers ----------
+  // ─── UI helpers ───────────────────────────────────────────
 
   function zoneClass(bpm) {
     if (bpm < 100) return "low";
@@ -139,7 +146,7 @@
     statusEl.className = "status " + cls;
   }
 
-  // ---------- canvas ----------
+  // ─── Canvas ───────────────────────────────────────────────
 
   function fitCanvas() {
     const dpr = window.devicePixelRatio || 1;
@@ -155,7 +162,6 @@
     const h = canvas.clientHeight;
     ctx.clearRect(0, 0, w, h);
 
-    // Grid
     ctx.strokeStyle = "#21262d";
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
@@ -171,7 +177,6 @@
     };
     const xFor = (i) => (i / (MAX_POINTS - 1)) * w;
 
-    // Line
     ctx.lineWidth = 2;
     ctx.strokeStyle = "#58a6ff";
     ctx.beginPath();
@@ -185,7 +190,6 @@
     });
     ctx.stroke();
 
-    // Last point dot
     const last = visible[visible.length - 1];
     ctx.fillStyle = "#e6edf3";
     ctx.beginPath();
@@ -204,13 +208,66 @@
 
   window.addEventListener("resize", fitCanvas);
 
-  // ---------- Web Bluetooth ----------
+  // ─── WebSocket ────────────────────────────────────────────
+
+  let ws = null;
+  let wsRetryTimer = null;
+
+  function connectWS() {
+    clearTimeout(wsRetryTimer);
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      console.error("WS create error:", e);
+      setStatus("WS ошибка URL", "err");
+      wsRetryTimer = setTimeout(connectWS, 3000);
+      return;
+    }
+
+    ws.onopen = () => {
+      console.log("WS connected");
+      if (!hasWebBluetooth) setStatus("ожидание пульса…", "wait");
+    };
+
+    ws.onmessage = (event) => {
+      // На часах все данные приходят сюда
+      if (hasWebBluetooth) return;
+      try {
+        const data = JSON.parse(event.data);
+        if (typeof data.bpm === "number") {
+          pushPoint(data.bpm);
+          setStatus("получено", "on");
+        }
+      } catch (e) { /* ignore */ }
+    };
+
+    ws.onclose = () => {
+      console.log("WS closed, reconnecting…");
+      if (!hasWebBluetooth) setStatus("переподключение…", "err");
+      wsRetryTimer = setTimeout(connectWS, 2000);
+    };
+
+    ws.onerror = (e) => {
+      console.error("WS error:", e);
+      if (!hasWebBluetooth) setStatus("WS ошибка", "err");
+    };
+  }
+
+  function sendBpm(bpm) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ bpm }));
+      } catch (e) {
+        console.error("WS send error:", e);
+      }
+    }
+  }
+
+  // ─── Web Bluetooth ────────────────────────────────────────
 
   function parseHeartRate(dataView) {
     const flags = dataView.getUint8(0);
-    if (flags & 0x01) {
-      return dataView.getUint16(1, /* littleEndian */ true);
-    }
+    if (flags & 0x01) return dataView.getUint16(1, true);
     return dataView.getUint8(1);
   }
 
@@ -218,23 +275,19 @@
     try {
       const bpm = parseHeartRate(event.target.value);
       pushPoint(bpm);
+      sendBpm(bpm);
     } catch (e) {
       console.error("Parse error:", e);
     }
   }
 
-  async function connect() {
+  async function connectBluetooth() {
     if (!navigator.bluetooth) {
       setStatus("Web Bluetooth недоступен", "err");
-      alert(
-        "Ваш браузер не поддерживает Web Bluetooth.\n" +
-        "Используйте Chrome, Edge или Opera на Android."
-      );
       return;
     }
-
     try {
-      setStatus("поиск устройства…", "");
+      setStatus("поиск устройства…", "wait");
       btn.disabled = true;
 
       device = await navigator.bluetooth.requestDevice({
@@ -244,17 +297,13 @@
 
       device.addEventListener("gattserverdisconnected", onDisconnected);
 
-      setStatus("подключение…", "");
+      setStatus("подключение…", "wait");
       const server = await device.gatt.connect();
-
       const service = await server.getPrimaryService("heart_rate");
       characteristic = await service.getCharacteristic("heart_rate_measurement");
 
       await characteristic.startNotifications();
-      characteristic.addEventListener(
-        "characteristicvaluechanged",
-        onHeartRateChanged
-      );
+      characteristic.addEventListener("characteristicvaluechanged", onHeartRateChanged);
 
       isConnected = true;
       setStatus("подключено: " + (device.name || "H10"), "on");
@@ -268,34 +317,21 @@
         setStatus("устройство не выбрано", "");
       } else if (err.name === "SecurityError" || err.name === "NotAllowedError") {
         setStatus("нужен HTTPS", "err");
-        alert(
-          "Bluetooth заблокирован.\n\n" +
-          "Chrome требует HTTPS или localhost для Web Bluetooth.\n" +
-          "Загрузите этот файл на GitHub Pages / Netlify или откройте через https://."
-        );
+        alert("Bluetooth заблокирован. Откройте страницу по HTTPS в Chrome.");
       } else {
         setStatus("ошибка: " + err.message, "err");
       }
     }
   }
 
-  async function disconnect() {
+  async function disconnectBluetooth() {
     try {
       if (characteristic) {
-        characteristic.removeEventListener(
-          "characteristicvaluechanged",
-          onHeartRateChanged
-        );
-        try {
-          await characteristic.stopNotifications();
-        } catch {}
+        characteristic.removeEventListener("characteristicvaluechanged", onHeartRateChanged);
+        try { await characteristic.stopNotifications(); } catch {}
       }
-      if (device && device.gatt && device.gatt.connected) {
-        device.gatt.disconnect();
-      }
-    } catch (e) {
-      console.error(e);
-    }
+      if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
+    } catch (e) { console.error(e); }
     onDisconnected();
   }
 
@@ -310,14 +346,22 @@
     btn.disabled = false;
   }
 
-  btn.addEventListener("click", () => {
-    if (isConnected) disconnect();
-    else connect();
-  });
-
-  // ---------- init ----------
+  // ─── Init ─────────────────────────────────────────────────
 
   fitCanvas();
+  connectWS();
+
+  if (hasWebBluetooth) {
+    btn.classList.remove("hidden");
+    btn.addEventListener("click", () => {
+      if (isConnected) disconnectBluetooth();
+      else connectBluetooth();
+    });
+    setStatus("готово к подключению", "");
+  } else {
+    btn.classList.add("hidden");
+    setStatus("ожидание сервера…", "wait");
+  }
 })();
 </script>
 </body>
