@@ -35,8 +35,6 @@
   .status.on   { background: #1f6feb33; color: #58a6ff; }
   .status.err  { background: #f8514933; color: #f85149; }
   .status.wait { background: #d2992233; color: #d29922; }
-
-  /* Вкладки */
   .tabs {
     display: flex; gap: 4px;
     background: #161b22; border-radius: 10px; padding: 4px;
@@ -48,10 +46,7 @@
     color: #8b949e; cursor: pointer; user-select: none;
     transition: background .15s ease, color .15s ease;
   }
-  .tab.active {
-    background: #1f6feb; color: #fff;
-  }
-
+  .tab.active { background: #1f6feb; color: #fff; }
   .bpm-row {
     display: flex; align-items: baseline; gap: 8px;
     justify-content: center;
@@ -135,7 +130,7 @@
   const MAX_POINTS = 300;
   const MIN_BPM = 40;
   const MAX_BPM = 200;
-  const MODE_KEY = "polar_mode"; // 'phone' | 'watch'
+  const MODE_KEY = "polar_mode";
 
   const bpmEl    = document.getElementById("bpm");
   const statusEl = document.getElementById("status");
@@ -153,6 +148,7 @@
   let isConnected = false;
   let ws = null;
   let wsRetryTimer = null;
+  let wakeLock = null;
 
   // ─── UI helpers ───────────────────────────────────────────
 
@@ -195,18 +191,11 @@
     if (mode === newMode) return;
     mode = newMode;
     localStorage.setItem(MODE_KEY, mode);
-
-    // Если переключаемся с телефона на часы — отключаем Bluetooth
-    if (mode === "watch" && isConnected) {
-      disconnectBluetooth();
-    }
-
-    // Очистим график при смене режима
+    if (mode === "watch" && isConnected) disconnectBluetooth();
     points.length = 0;
     bpmEl.textContent = "--";
     bpmEl.className = "bpm low";
     draw();
-
     applyModeUI();
   }
 
@@ -294,7 +283,7 @@
     };
 
     ws.onmessage = (event) => {
-      if (mode !== "watch") return; // в режиме телефона игнорируем
+      if (mode !== "watch") return;
       try {
         const data = JSON.parse(event.data);
         if (typeof data.bpm === "number") {
@@ -402,9 +391,7 @@
   function onDisconnected() {
     isConnected = false;
     characteristic = null;
-    if (mode === "phone") {
-      setStatus("отключено", "err");
-    }
+    if (mode === "phone") setStatus("отключено", "err");
     bpmEl.textContent = "--";
     bpmEl.className = "bpm low";
     btn.textContent = "Подключить Polar H10";
@@ -412,11 +399,54 @@
     btn.disabled = false;
   }
 
+  // ─── Wake Lock ────────────────────────────────────────────
+
+  async function requestWakeLock() {
+    if (!("wakeLock" in navigator)) {
+      console.warn("Wake Lock API не поддерживается");
+      return;
+    }
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      console.log("Wake Lock активен — экран не гаснет");
+    } catch (err) {
+      console.warn("Wake Lock не получен:", err.message);
+    }
+  }
+
+  async function releaseWakeLock() {
+    if (wakeLock) {
+      try { await wakeLock.release(); } catch (e) {}
+      wakeLock = null;
+    }
+  }
+
   // ─── Init ─────────────────────────────────────────────────
 
   fitCanvas();
   connectWS();
   applyModeUI();
+
+  // Wake Lock при первом взаимодействии (браузер требует действие пользователя)
+  document.addEventListener("click", () => {
+    if (!wakeLock) requestWakeLock();
+  }, { once: true });
+
+  // При возврате на страницу — снова захватываем Wake Lock и переподключаем WS
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState === "visible") {
+      await requestWakeLock();
+      if (!ws || ws.readyState === WebSocket.CLOSED) {
+        connectWS();
+      }
+    } else {
+      // Страница ушла в фон — освобождаем блокировку (система всё равно заморозит)
+      await releaseWakeLock();
+    }
+  });
+
+  // Попытка сразу (может сработать, если страница уже была активна)
+  requestWakeLock();
 
   btn.addEventListener("click", () => {
     if (isConnected) disconnectBluetooth();
